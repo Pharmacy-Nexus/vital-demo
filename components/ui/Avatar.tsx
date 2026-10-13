@@ -1,0 +1,1 @@
+export default function Avatar({name,color="#51405D",size=48}:{name:string;color?:string;size?:number}){ const initials=name.split(" ").map(x=>x[0]).slice(0,2).join(""); return <div className="rounded-full text-white font-bold flex items-center justify-center shrink-0" style={{width:size,height:size,background:color}}>{initials}</div> }
