@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/server/supabaseAdmin";
+import { lookupEmergencyRecord } from "@/lib/server/emergencyLookup";
 import { buildEmergencyPatient, sanitizeDeviceForPublic } from "@/lib/server/publicProfile";
 import { authorizedMedicalPath } from "@/lib/server/storageAuthorization";
 import { enforceRateLimit, medicalNoStore } from "@/lib/server/rateLimit";
@@ -16,11 +17,11 @@ export async function GET(request: Request, { params }: { params: Promise<{ slug
     if (limited) return limited;
   }
   const admin = getSupabaseAdmin();
-  if (!admin) return NextResponse.json({ error: "cloud_not_configured" }, { status: 503 });
-  const { data, error } = await admin.rpc("vital_public_emergency_lookup", { p_slug: slug });
-  if (error) return NextResponse.json({ error: "lookup_unavailable" }, { status: 503 });
-  const row = Array.isArray(data) ? data[0] : null;
-  if (!row) return NextResponse.json({ error: "not_found_or_disabled" }, { status: 404 });
+  if (!admin) return NextResponse.json({ error: "cloud_not_configured" }, { status: 503, headers: medicalNoStore });
+  const lookup = await lookupEmergencyRecord(admin, slug);
+  if (lookup.kind === "unavailable") return NextResponse.json({ error: "lookup_unavailable" }, { status: 503, headers: medicalNoStore });
+  if (lookup.kind === "not_found") return NextResponse.json({ error: "not_found_or_disabled" }, { status: 404, headers: medicalNoStore });
+  const row = lookup.record;
   const publicDevice = sanitizeDeviceForPublic(row.device_data as LinkedDevice);
   const source = row.patient_data as PatientProfile;
   const patient = buildEmergencyPatient(source, publicDevice);

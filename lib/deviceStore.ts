@@ -67,12 +67,12 @@ export function getPrimaryDevice(patientSlug: string) {
   return readDevices().find((d) => d.patientSlug === patientSlug && d.status === "active") ?? null;
 }
 
-export function saveDevice(device: LinkedDevice) {
+export function saveDevice(device: LinkedDevice, syncCloud = true) {
   const all = readDevices();
   const normalized = normalize(device);
   const exists = all.some((d) => d.id === device.id);
   writeDevices(exists ? all.map((d) => d.id === device.id ? normalized : d) : [normalized, ...all]);
-  void upsertCloudDevice(normalized).catch(() => {});
+  if (syncCloud) void upsertCloudDevice(normalized).catch(() => {});
 }
 
 export function updateDevice(id: string, updater: (device: LinkedDevice) => LinkedDevice) {

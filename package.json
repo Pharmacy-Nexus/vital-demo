@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
-    "test:security": "node --test tests/security-regression.mjs tests/new-profile-and-emergency.test.mjs",
+    "test:security": "node --test tests/security-regression.mjs tests/new-profile-and-emergency.test.mjs tests/emergency-cloud-fallback.test.mjs",
     "test:load": "node scripts/load-test.mjs",
     "typecheck": "tsc --noEmit",
     "check:project": "node scripts/check-project.mjs",

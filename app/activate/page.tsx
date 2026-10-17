@@ -1,16 +1,17 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { motion } from "framer-motion";
 import { Check, ArrowRight, User, Baby, Heart } from "lucide-react";
 import IdentityMark from "@/components/ui/IdentityMark";
 import { LangToggle, useLang } from "@/components/ui/LangProvider";
 import { savePatient } from "@/lib/patientStore";
 import { addActivity } from "@/lib/store";
-import { createDevice, getPrimaryDevice, saveDevice } from "@/lib/deviceStore";
+import { saveDevice } from "@/lib/deviceStore";
+import { defaultDisplaySettings } from "@/lib/defaultDeviceDisplay";
 import { getCloudUser, upsertCloudPatient, upsertCloudDevice } from "@/lib/cloud/repository";
 import { isCloudConfigured } from "@/lib/cloud/supabaseBrowser";
-import type { PatientProfile } from "@/lib/types";
+import type { LinkedDevice, PatientProfile } from "@/lib/types";
 
 const steps = ["welcome", "who", "emergency", "success"] as const;
 type Step = (typeof steps)[number];
@@ -82,6 +83,11 @@ export default function ActivatePage() {
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [emergencyHref, setEmergencyHref] = useState("");
+  // Failed activation retries reuse identifiers instead of creating orphan
+  // medical profiles and QR cards for every attempt.
+  const pendingSlug = useRef<string | null>(null);
+  const pendingDeviceId = useRef<string | null>(null);
+  const pendingQrSlug = useRef<string | null>(null);
 
   const set = <K extends keyof FormState>(key: K, value: FormState[K]) => setForm((prev) => ({ ...prev, [key]: value }));
 
@@ -99,7 +105,11 @@ export default function ActivatePage() {
       return;
     }
 
-    if (isCloudConfigured() && !(await getCloudUser())) {
+    if (!isCloudConfigured()) {
+      setError(tr("Cloud connection is required for a real emergency ID. Contact support before printing a card.", "خدمة Supabase غير متصلة، وبالتالي لا يمكن تفعيل بطاقة طوارئ تعمل من موبايل آخر."));
+      return;
+    }
+    if (!(await getCloudUser())) {
       setError(tr("Sign in first so the card works on other phones. Your details have not been saved.", "سجّل دخول الأول علشان الكارت يشتغل على الموبايلات الأخرى. لم تُحفظ البيانات بعد."));
       return;
     }
@@ -115,7 +125,7 @@ export default function ActivatePage() {
       photoEmergencyVisible: false,
       sex: form.sex,
       emergencySummary: form.emergencySummary.trim().slice(0, 800),
-      slug: `p-${crypto.randomUUID().replace(/-/g, "")}`,
+      slug: pendingSlug.current ?? (pendingSlug.current = `p-${crypto.randomUUID().replace(/-/g, "")}`),
       firstName,
       lastName,
       relationshipToOwner: who === "child" ? "child" : who === "other" ? "caregiver" : "self",
@@ -163,11 +173,18 @@ export default function ActivatePage() {
       linkedIds: 1,
     };
 
-    savePatient(patient, true);
-    // The patient must exist before a cloud QR device can be linked to it.
-    if (isCloudConfigured() && !(await upsertCloudPatient(patient))) throw new Error("Patient was not saved to the cloud");
-    const existingDevice = getPrimaryDevice(patient.slug);
-    const device = existingDevice ?? createDevice(patient.slug, tr("Emergency ID", "هوية الطوارئ"), who === "child" ? "bagtag" : "bracelet");
+    // Persist to Supabase first. Local saving alone does not make a QR public.
+    if (!(await upsertCloudPatient(patient))) throw new Error("patient_not_synced");
+    const device: LinkedDevice = {
+      id: pendingDeviceId.current ?? (pendingDeviceId.current = crypto.randomUUID()),
+      name: tr("Emergency ID", "هوية الطوارئ"),
+      patientSlug: patient.slug,
+      qrSlug: pendingQrSlug.current ?? (pendingQrSlug.current = `qr-${crypto.randomUUID().replace(/-/g, "")}`),
+      type: who === "child" ? "bagtag" : "bracelet",
+      status: "active",
+      createdAt: today,
+      display: { ...defaultDisplaySettings },
+    };
     const publicDisplay = {
       ...device.display,
       basicInfo: form.shareEmergencyInfo,
@@ -177,14 +194,21 @@ export default function ActivatePage() {
       bloodType: form.shareEmergencyInfo,
       emergencySummary: form.shareSummary && Boolean(patient.emergencySummary),
     };
-    const activeDevice = { ...device, display: publicDisplay };
-    saveDevice(activeDevice);
-    if (isCloudConfigured() && !(await upsertCloudDevice(activeDevice))) throw new Error("Medical ID was not saved to the cloud");
+    const activeDevice: LinkedDevice = { ...device, display: publicDisplay };
+    if (!(await upsertCloudDevice(activeDevice))) throw new Error("device_not_synced");
+    // Verify the same anonymous API the scanning phone will call.
+    const check = await fetch(`/api/public/id/${encodeURIComponent(activeDevice.qrSlug)}`, { cache: "no-store" });
+    if (!check.ok) throw new Error(`emergency_api_${check.status}`);
+    savePatient(patient, true);
+    saveDevice(activeDevice, false);
+    pendingSlug.current = null;
+    pendingDeviceId.current = null;
+    pendingQrSlug.current = null;
     setEmergencyHref(`/id/${activeDevice.qrSlug}`);
     addActivity({ type: "update", title: "Medical ID activated", detail: `${firstName} ${lastName}` });
     setStep("success");
     } catch (e) {
-      setError(tr("Could not finish cloud activation. Please try again and check your connection.", "لم نتمكن من إكمال التفعيل السحابي. راجع الاتصال وحاول مرة أخرى."));
+      setError(tr("We could not verify the emergency page online. No new card has been activated locally. Check your Supabase and Vercel settings, then retry.", "تعذر التأكد من صفحة الطوارئ أونلاين، ولم نعرض كارتًا غير مؤكد. راجع ربط Supabase وVercel ثم أعد المحاولة."));
       console.error("VITAL ID activation failed", e);
     } finally {
       setBusy(false);
