@@ -20,48 +20,81 @@ const fallbackDisplay = {
   documents: false,
 };
 
-const emergencyVoiceMessage = {
-  ar: "إذا كانت هناك حالة طارئة تهدد الحياة، اتصل بالإسعاف فوراً أو اطلب المساعدة للوصول إلى أقرب قسم طوارئ. لا تؤخر طلب المساعدة.",
-  en: "If this is a life-threatening emergency, call local emergency services now or seek the nearest emergency department. Do not delay getting help.",
-};
+const englishEmergencyVoiceMessage = "If this is a life-threatening emergency, call local emergency services now or seek the nearest emergency department. Do not delay getting help.";
 
 export default function EmergencyView({ patient, device, scanId, remote = false, onRequestDoctor }: { patient: PatientProfile; device?: LinkedDevice | null; scanId?: string; remote?: boolean; onRequestDoctor: () => void }) {
   const { tr } = useLang();
   const [audioState, setAudioState] = useState<"idle" | "speaking" | "unsupported">("idle");
   const hasAutoTried = useRef(false);
+  const arabicAudioRef = useRef<HTMLAudioElement>(null);
+  const playbackIdRef = useRef(0);
+  const isPlayingRef = useRef(false);
   const [msg, setMsg] = useState("");
   const display = device?.display ?? fallbackDisplay;
 
+  const stopInstructions = () => {
+    playbackIdRef.current += 1;
+    isPlayingRef.current = false;
+    const audio = arabicAudioRef.current;
+    if (audio) {
+      audio.pause();
+      audio.currentTime = 0;
+      audio.onended = null;
+      audio.onerror = null;
+    }
+    if (typeof window !== "undefined" && "speechSynthesis" in window) window.speechSynthesis.cancel();
+    setAudioState("idle");
+  };
+
   const speakInstructions = (auto = false) => {
-    if (typeof window === "undefined" || !("speechSynthesis" in window) || typeof SpeechSynthesisUtterance === "undefined") {
+    if (!auto && isPlayingRef.current) {
+      stopInstructions();
+      return;
+    }
+    stopInstructions();
+    const audio = arabicAudioRef.current;
+    if (!audio) {
       if (!auto) setAudioState("unsupported");
       return;
     }
-    if (!auto && window.speechSynthesis.speaking) {
-      window.speechSynthesis.cancel();
-      setAudioState("idle");
-      return;
-    }
-    window.speechSynthesis.cancel();
-    const messages = [
-      { text: emergencyVoiceMessage.ar, locale: "ar-EG" },
-      { text: emergencyVoiceMessage.en, locale: "en-US" },
-    ];
-    messages.forEach((entry, i) => {
-      const utterance = new SpeechSynthesisUtterance(entry.text);
-      utterance.lang = entry.locale;
+    const playbackId = playbackIdRef.current;
+    isPlayingRef.current = true;
+    audio.onended = () => {
+      if (playbackId !== playbackIdRef.current) return;
+      // Arabic uses the supplied MP3. English keeps the existing browser voice.
+      if (!("speechSynthesis" in window) || typeof SpeechSynthesisUtterance === "undefined") {
+        isPlayingRef.current = false;
+        setAudioState("idle");
+        return;
+      }
+      const utterance = new SpeechSynthesisUtterance(englishEmergencyVoiceMessage);
+      utterance.lang = "en-US";
       utterance.rate = 0.9;
       utterance.volume = 1;
-      utterance.onstart = () => setAudioState("speaking");
-      utterance.onerror = () => setAudioState("idle");
-      if (i === messages.length - 1) utterance.onend = () => setAudioState("idle");
+      utterance.onend = utterance.onerror = () => {
+        if (playbackId !== playbackIdRef.current) return;
+        isPlayingRef.current = false;
+        setAudioState("idle");
+      };
       window.speechSynthesis.speak(utterance);
+    };
+    audio.onerror = () => {
+      if (playbackId !== playbackIdRef.current) return;
+      isPlayingRef.current = false;
+      setAudioState("unsupported");
+    };
+    audio.currentTime = 0;
+    // Automatic audio may be blocked by the browser; the button allows manual play.
+    void audio.play().then(() => {
+      if (playbackId === playbackIdRef.current) setAudioState("speaking");
+    }).catch(() => {
+      if (playbackId !== playbackIdRef.current) return;
+      isPlayingRef.current = false;
+      if (!auto) setAudioState("unsupported");
     });
   };
 
   useEffect(() => {
-    // Speech autoplay is best-effort: some browsers require an explicit gesture.
-    // Never speak private patient text automatically in a public setting.
     if (hasAutoTried.current) return;
     const once = window.setTimeout(() => {
       hasAutoTried.current = true;
@@ -69,12 +102,19 @@ export default function EmergencyView({ patient, device, scanId, remote = false,
     }, 450);
     return () => {
       window.clearTimeout(once);
+      playbackIdRef.current += 1;
+      isPlayingRef.current = false;
+      const audio = arabicAudioRef.current;
+      if (audio) {
+        audio.pause();
+        audio.onended = null;
+        audio.onerror = null;
+      }
       if ("speechSynthesis" in window) window.speechSynthesis.cancel();
     };
   // Only on first mount; re-fetching an emergency profile must not replay audio.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
 
   useEffect(() => { if (!remote) recordScan(scanId ?? patient.slug); }, [patient.slug, scanId, remote]);
 
@@ -122,6 +162,7 @@ export default function EmergencyView({ patient, device, scanId, remote = false,
         </div>
       </header>
 
+      <audio ref={arabicAudioRef} src="/audio/emergency-ar.mp3" preload="auto" />
       <main className="max-w-md mx-auto px-5 py-7 space-y-4">
         <section className="pb-6 border-b border-[#d2d2d7]">
           <div className="flex items-start justify-between gap-4">
@@ -153,7 +194,7 @@ export default function EmergencyView({ patient, device, scanId, remote = false,
             {audioState === "speaking" ? <VolumeX size={22}/> : <Volume2 size={22}/>}
             {audioState === "speaking" ? tr("Stop voice", "إيقاف الصوت") : tr("Play voice: Arabic + English", "تشغيل الصوت: عربي + إنجليزي")}
           </button>
-          {audioState === "unsupported" && <p role="status" className="text-xs mt-2">{tr("Your browser does not support speech. Read the instructions above.", "متصفحك لا يدعم الصوت. اقرأ التعليمات المكتوبة بالأعلى.")}</p>}
+          {audioState === "unsupported" && <p role="status" className="text-xs mt-2">{tr("Audio is unavailable. Read the instructions above.", "تعذر تشغيل الصوت. اقرأ التعليمات المكتوبة بالأعلى.")}</p>}
           <p className="text-[11px] leading-5 text-[#795348] mt-2">{tr("Autoplay is attempted once. Some browsers require pressing Play.", "نحاول تشغيل الصوت تلقائيًا مرة واحدة، وبعض المتصفحات تحتاج الضغط على زر التشغيل.")}</p>
         </section>
 
